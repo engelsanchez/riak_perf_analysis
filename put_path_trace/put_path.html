@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Put Path Visualization</title>
+<style>
+body {background-image:url(img/concrete_seamless.png)}
+* {font-family:Verdana;}
+div.labels { position:absolute; }
+div.process-label { position:absolute; margin-left:5px}
+#vis-panel {
+    position:relative;
+    border:1px solid #999; 
+    overflow:hidden; padding:0; background-color:white }
+#vis-panel > svg { position:absolute;left:200px}
+.proc-header { }
+rect.pblock { fill:#5AD8E6; stroke: black; stroke-width:1px;}
+line.msg {stroke:black; stroke-width:2px;}
+g.process-label text {font-size:14px}
+.t-axis path, .t-axis line {
+    fill: none;
+    stroke: #000;
+    shape-rendering: crispEdges;
+}
+</style>
+</head>
+
+<body>
+    <h1>Put Path Visualization</h1>
+    <div id="vis-panel"></div>
+
+<script src="d3/d3.min.js"></script>
+<script type="text/javascript">
+var data = {
+    start: 0,
+    end: 0.8,
+    processes: [
+        {label: "WM connection", pid: "0.54.0", runs:
+        [
+            { start: 0, end: 0.3 },
+            { start: 0.4, end: 0.6 },
+            { start: 0.65, end: 0.8 }
+        ]},
+        {label:"Put FSM", pid: "0.40.0", runs:
+        [
+            { start: 0.05, end: 0.3 },
+            { start: 0.5, end: 0.55 },
+            { start: 0.60, end: 0.65 }
+        ]},
+        {label:"Vnode", pid: "0.65.0", runs:
+        [
+            { start: 0.1, end: 0.3 },
+            { start: 0.4, end: 0.6 },
+            { start: 0.65, end: 0.8 }
+        ]}
+    ],
+    messages: [
+        {time: 0.05, from: 0, to: 1, payload: "Start this"},
+        {time: 0.45, from: 0, to: 2, payload: "{yo, biatch}"},
+        {time: 0.65, from: 1, to: 0, payload: "{yoyo, biatch}"}
+    ]
+};
+
+data.duration = data.end - data.start;
+
+var panExtent = [data.start-data.duration/10.0, data.end+data.duration/10.0];
+var lw = 250, w = 900, tw = lw + w;
+var axis_height = 20;
+var pblock_height = 20;
+var sh = 50, th = sh * data.processes.length + axis_height;
+d3.select("#vis-panel").style("height", th+"px");
+var tScale = d3.scale.linear()
+        .domain([0, data.duration])
+        .range([0, w]);
+var visPanel = d3.select("#vis-panel");
+var label_container = visPanel.append("div").classed("labels", true).style("width", lw + "px");
+var labels = label_container.selectAll("div.process-label")
+    .data(data.processes)
+    .enter()
+    .append("div").classed("process-label", true)
+    .style("top", function(d, i) {
+        var val = proc2height(d, i);
+        return (val - 10) + "px";
+    })
+    .text(function(d){ return d.label + " : " + d.pid; });
+
+function fmtTime(t) {
+    return t + "s";
+}
+
+var tAxis = d3.svg.axis().scale(tScale).orient("top")
+    .ticks(10).tickFormat(fmtTime)
+    .tickFormat(d3.format(".3f"))
+    .tickSize(2, 5);
+
+var zoom = d3.behavior.zoom()
+    .scaleExtent([1,1000])
+    .x(tScale)
+    .on("zoom", draw);
+
+var canvas = visPanel
+    .append("svg:svg")
+    .attr("id", "main-svg")
+    .attr("width", w)
+    .attr("height", th)
+    .call(zoom)
+    ;
+
+var axisG = canvas.append("g").classed("t-axis", true).attr("transform", "translate(0, "+(th)+")");
+
+// build the arrow.
+canvas.append("svg:defs").selectAll("marker")
+    .data(["end"])      // Different link/path types can be defined here
+    .enter().append("svg:marker")    // This section adds in the arrows
+    .attr("id", String)
+    .attr("viewBox", "0 -5 10 10")
+    .attr("refX", 8)
+    .attr("refY", 0)
+    .attr("markerWidth", 6)
+    .attr("markerHeight", 6)
+    .attr("orient", "auto")
+    .append("svg:path")
+    .attr("d", "M0,-5L10,0L0,5");
+
+var content = canvas.append("g")
+    .classed("diagram", true)
+    ;
+function proc2height(d, i) { return (i + 0.5) * sh; }
+
+var procs = content.append("g").attr("class", "processes")
+    .selectAll("g.process")
+    .data(data.processes)
+    .enter()
+    .append("g")
+    .classed("process", true)
+    .attr("transform", function(d,i){return "translate(0,"+((i+.5)*sh-pblock_height/2.0)+")";})
+    ;
+
+var plines = procs.append("line")
+    .attr("stroke", "black").attr("stroke-width", "1px")
+    .attr("stroke-dasharray", "1,1")
+   .attr("x1", 0).attr("y1", pblock_height / 2.0) 
+   .attr("x2", tScale(data.duration)).attr("y2", pblock_height / 2.0); 
+var idFun = function(d) { return d;};
+
+var pblocks = procs.selectAll("rect.pblock")
+    .data(function(d){return d.runs;})
+    .enter().append("rect")
+    .attr("height", pblock_height)
+    .classed("pblock", true)
+    ;
+
+var msg_container = content.append("g").classed("msgs", true);
+
+function time2x(d) { return tScale(d.time); };
+function to_proc_y(msg) {
+    return proc2height(null, msg.to);
+}
+
+function from_proc_y(msg) {
+    var ofs = msg.from > msg.to ? -pblock_height / 2.0 : pblock_height / 2.0;
+    return proc2height(null, msg.from) + ofs;
+}
+
+var msgs = msg_container.selectAll("line.msg")
+    .data(data.messages)
+    .enter()
+    .append("line")
+    .classed("msg", true)
+    .attr("marker-end", "url(#end)")
+    ;
+
+    /* Add msg payload to arrow's tooltip */
+    msgs.append("title").text(function(d){return d.payload;})
+;
+
+draw();
+
+function draw() {
+    zoom.translate(panLimit());
+    tAxis(axisG);
+    pblocks.attr("width", function(d){return tScale(d.end) - tScale(d.start);})
+    .attr("x", function(d){return tScale(d.start);});
+
+    msgs.attr("x1", time2x)
+    .attr("x2", time2x)
+    .attr("y1", from_proc_y)
+    .attr("y2", to_proc_y);
+}
+
+function panLimit() {
+    var x = tScale,
+    omin = data.start, omax = data.end,
+    xdom = x.domain(),
+    dmin = xdom[0], dmax = xdom[1], dlength = dmax - dmin,
+    emin = panExtent[0], emax = panExtent[1],
+    zscale = zoom.scale(),
+    factor = w / dlength,
+    xmin = (omin - emin) * factor, 
+    xmax = (omax - emax) * factor - w * (zscale - 1),
+    tx = dmin < emin ?  xmin : (dmax > emax ?  xmax : zoom.translate()[0]),
+    ty = zoom.translate()[1]
+        ;
+
+    console.log("emin = "+emin+", emax = "+emax+", factor = "+factor);
+    console.log("dmin = "+dmin+", dmax = "+dmax+", zscale = "+zscale);
+    console.log("xmin = "+xmin+", xmax = "+xmax+", tr = "+zoom.translate());
+    return [tx,ty];
+}
+</script>
+</body>
+</html>
