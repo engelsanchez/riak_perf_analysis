@@ -82,13 +82,27 @@ create_json(Filename) ->
             ok
     end.
 
+write_list(_OF, _EFun, []) ->
+    ok;
+write_list(OF, EFun, [E|Rest]) ->
+    EFun(OF, E),
+    case Rest of
+        [] ->
+            io:format(OF, "\n", []);
+        _ ->
+            io:format(OF, ",\n", [])
+    end,
+    write_list(OF, EFun, Rest).
+
 write_proc(OF, #proc{label = Label, pid = Pid, runs = Runs}) ->
     io:format(OF, "\t\t{\"label\": \"~s\", \"pid\": \"~p\", \"runs\":\n", [Label, Pid]),
     io:format(OF, "\t\t[\n",[]),
-    [begin
-         io:format(OF, "\t\t\t{\"start\": ~p, \"end\": ~p },\n", [RS, RE])
-     end || #run{start_time = RS, end_time = RE} <- Runs],
-    io:format(OF, "\t\t]},\n", []),
+    write_list(OF,
+               fun(F, #run{start_time = RS, end_time = RE}) ->
+                       io:format(F, "\t\t\t{\"start\": ~p, \"end\": ~p }",
+                                 [RS, RE])
+               end, Runs),
+    io:format(OF, "\t\t]}", []),
     ok.
 
 escape_str(Term) ->
@@ -100,7 +114,8 @@ escape_str(Term) ->
     .
 
 write_msg(OF, #msg{from = From, to = To, time = Time, payload = Payload}) ->
-    io:format(OF, "\t\t{\"time\": ~p, \"from\": ~p, \"to\": ~p, \"payload\": \"~s\"},\n",
+    io:format(OF, "\t\t{\"time\": ~p, \"from\": ~p, \"to\": ~p,"
+              " \"payload\": \"~s\"}",
               [Time, From, To, escape_str(Payload)]),
     ok.
 
@@ -112,12 +127,12 @@ write_result(#state{filename = Fname,
     {ok, OF} = file:open(Fname, [write]),
     io:format(OF, "{\n\t\"start\": ~p,\n\t\"end\": ~p,\n", [Start, End]),
     io:format(OF, "\t\"processes\": [\n", []),
-    [write_proc(OF, Proc) || Proc <- Procs],
+    write_list(OF, fun write_proc/2, Procs), 
     io:format(OF, "\t],\n", []),
     io:format(OF, "\t\"messages\": [\n", []),
-    [write_msg(OF, Msg) || Msg <- Msgs],
-    io:format(OF, "\t],\n", []),
-    io:format(OF, "};\n", []),
+    write_list(OF, fun write_msg/2, Msgs),
+    io:format(OF, "\t]\n", []),
+    io:format(OF, "}\n", []),
     file:close(OF),
     ok.
 

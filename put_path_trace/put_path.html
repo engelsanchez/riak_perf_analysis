@@ -31,6 +31,7 @@ g.process-label text {font-size:14px}
 
 <script src="../d3/d3.min.js"></script>
 <script type="text/javascript">
+/*
 var data = {
     start: 0,
     end: 0.8,
@@ -60,7 +61,11 @@ var data = {
         {time: 0.65, from: 1, to: 0, payload: "{yoyo, biatch}"}
     ]
 };
-
+*/
+d3.json("trace_1.json", function(err, data) {
+    if (err) {
+        alert(err.toString());
+    }
 data.duration = data.end - data.start;
 
 var panExtent = [data.start-data.duration/10.0, data.end+data.duration/10.0];
@@ -207,6 +212,7 @@ function panLimit() {
     console.log("xmin = "+xmin+", xmax = "+xmax+", tr = "+zoom.translate());
     return [tx,ty];
 }
+});
 </script>
 </body>
 </html>
