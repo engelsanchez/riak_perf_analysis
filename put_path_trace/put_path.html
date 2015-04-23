@@ -7,7 +7,7 @@
 body {background-image:url(img/concrete_seamless.png)}
 * {font-family:Verdana;}
 div.labels { position:absolute; }
-div.process-label { position:absolute; margin-left:5px}
+div.process-label { position:absolute; margin-left:5px; font-size:14px}
 #process-diagram {
     position:relative;
     border:1px solid #999; 
@@ -223,8 +223,8 @@ data.duration = data.end - data.start;
 var panExtent = [data.start-data.duration/10.0, data.end+data.duration/10.0];
 var lw = 250, w = 900, tw = lw + w;
 var axis_height = 20;
-var pblock_height = 20;
-var sh = 50, th = sh * data.processes.length + axis_height;
+var pblock_height = 12;
+var sh = 30, th = sh * data.processes.length + axis_height;
 d3.select("#process-diagram").style("height", th+"px");
 var tScale = d3.scale.linear()
         .domain([0, data.duration])

@@ -256,7 +256,33 @@ do_call(Pid, MFArgs, Time, State) ->
     Fcall = #fcall{start_time = Time, mfa = MFArgs},
     Proc2 = Proc1#proc{stack = [Fcall | Proc1#proc.stack],
                        current = Proc1#proc.current#run{seen_call = true}},
-    update_proc(Proc2, State1).
+    Proc3 = maybe_label_proc(Proc2, MFArgs),
+    update_proc(Proc3, State1).
+
+maybe_label_proc(Proc, {riak_kv_put_fsm, init, _}) ->
+    Proc#proc{label="Put FSM"};
+maybe_label_proc(Proc, {riak_kv_get_fsm, init, _}) ->
+    Proc#proc{label="Get FSM"};
+maybe_label_proc(Proc, {riak_kv_wm_object, malformed_request, _}) ->
+    Proc#proc{label="WM Worker"};
+maybe_label_proc(Proc, {riak_kv_index_hashtree, handle_cast, _}) ->
+    Proc#proc{label="Vnode AAE process"};
+maybe_label_proc(Proc, {riak_kv_vnode, handle_command, _}) ->
+    Proc#proc{label="KV Vnode"};
+maybe_label_proc(Proc, {riak_core_vnode_proxy, loop, _}) ->
+    Proc#proc{label="Vnode Proxy"};
+maybe_label_proc(Proc, {riak_kv_stat_worker, handle_cast, _}) ->
+    Proc#proc{label="KV Stat Worker"};
+maybe_label_proc(Proc, {sidejob_supervisor, handle_call, _}) ->
+    Proc#proc{label="Sidejob Sup"};
+maybe_label_proc(Proc, {exometer_probe, handle_msg, _}) ->
+    Proc#proc{label="Exometer Probe"};
+maybe_label_proc(Proc, {mochiweb_socket_server, handle_info, _}) ->
+    Proc#proc{label="Mochi Socket"};
+maybe_label_proc(Proc, {webmachine_decision_core, do_log, _}) ->
+    Proc#proc{label="WM Log Worker"};
+maybe_label_proc(Proc, _) ->
+    Proc.
 
 do_return(Pid, {M, F, A}, Time, State) ->
     {Proc = #proc{stack = Stack,
