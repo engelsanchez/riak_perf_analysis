@@ -8,11 +8,11 @@ body {background-image:url(img/concrete_seamless.png)}
 * {font-family:Verdana;}
 div.labels { position:absolute; }
 div.process-label { position:absolute; margin-left:5px}
-#vis-panel {
+#process-diagram {
     position:relative;
     border:1px solid #999; 
     overflow:hidden; padding:0; background-color:white }
-#vis-panel > svg { position:absolute;left:200px}
+#process-diagram > svg { position:absolute;left:200px}
 .proc-header { }
 rect.pblock { fill:#5AD8E6; stroke: black; stroke-width:1px;}
 line.msg {stroke:black; stroke-width:2px;}
@@ -22,49 +22,201 @@ g.process-label text {font-size:14px}
     stroke: #000;
     shape-rendering: crispEdges;
 }
+.node rect {
+    cursor: pointer;
+    fill: #fff;
+    fill-opacity: .5;
+    stroke: #3182bd;
+    stroke-width: 1.5px;
+}
+
+.node text {
+    font: 10px sans-serif;
+    pointer-events: none;
+}
+
+path.link {
+    fill: none;
+    stroke: #9ecae1;
+    stroke-width: 1.5px;
+}
+
 </style>
 </head>
 
 <body>
     <h1>Put Path Visualization</h1>
-    <div id="vis-panel"></div>
+    <div id="process-diagram"></div>
+    <div id="calls"></div>
 
 <script src="../d3/d3.min.js"></script>
 <script type="text/javascript">
-/*
-var data = {
-    start: 0,
-    end: 0.8,
-    processes: [
-        {label: "WM connection", pid: "0.54.0", runs:
-        [
-            { start: 0, end: 0.3 },
-            { start: 0.4, end: 0.6 },
-            { start: 0.65, end: 0.8 }
-        ]},
-        {label:"Put FSM", pid: "0.40.0", runs:
-        [
-            { start: 0.05, end: 0.3 },
-            { start: 0.5, end: 0.55 },
-            { start: 0.60, end: 0.65 }
-        ]},
-        {label:"Vnode", pid: "0.65.0", runs:
-        [
-            { start: 0.1, end: 0.3 },
-            { start: 0.4, end: 0.6 },
-            { start: 0.65, end: 0.8 }
-        ]}
-    ],
-    messages: [
-        {time: 0.05, from: 0, to: 1, payload: "Start this"},
-        {time: 0.45, from: 0, to: 2, payload: "{yo, biatch}"},
-        {time: 0.65, from: 1, to: 0, payload: "{yoyo, biatch}"}
-    ]
-};
-*/
-d3.json("trace_1.json", function(err, data) {
+
+
+var margin = {top: 30, right: 20, bottom: 30, left: 20},
+    width = 960 - margin.left - margin.right,
+    barHeight = 20,
+    barWidth = width * .8;
+
+var i = 0,
+    duration = 400,
+    call_root;
+
+var tree = d3.layout.tree()
+    .nodeSize([0, 20]);
+
+var diagonal = d3.svg.diagonal()
+    .projection(function(d) { return [d.y, d.x]; });
+
+var call_svg = d3.select("#calls").append("svg")
+    .attr("width", width + margin.left + margin.right)
+    .append("g")
+    .attr("transform", "translate(" + margin.left + "," + margin.top + ")");
+
+    /*
+d3.json("flare.json", function(error, flare) {
+        flare.x0 = 0;
+        flare.y0 = 0;
+        update_calls(call_root = flare);
+    });
+    */
+
+function update_calls(source) {
+
+    var nodes = tree.nodes(call_root);
+
+    var height = Math.max(500, nodes.length * barHeight + margin.top + margin.bottom);
+
+    d3.select("#calls > svg").transition()
+        .duration(duration)
+        .attr("height", height);
+
+    /*
+    d3.select(self.frameElement).transition()
+        .duration(duration)
+        .style("height", height + "px");
+        */
+
+    // Compute the "layout".
+    nodes.forEach(function(n, i) {
+        n.x = i * barHeight;
+    });
+
+    // Update the nodes…
+    var node = call_svg.selectAll("g.node")
+        .data(nodes, function(d) { return d.id || (d.id = ++i); });
+
+    var nodeEnter = node.enter().append("g")
+        .attr("class", "node")
+        .attr("transform", function(d) { return "translate(" + source.y0 + "," + source.x0 + ")"; })
+        .style("opacity", 1e-6);
+
+    // Enter any new nodes at the parent's previous position.
+    nodeEnter.append("rect")
+        .attr("y", -barHeight / 2)
+        .attr("height", barHeight)
+        .attr("width", barWidth)
+        .style("fill", color)
+        .on("click", click);
+
+    nodeEnter.append("text")
+        .attr("dy", 3.5)
+        .attr("dx", 5.5)
+        .text(function(d) {
+            return d.name + " ( "+d3.format(".1f")(d.end - d.start)+"usecs )";
+        });
+
+    // Transition nodes to their new position.
+    nodeEnter.transition()
+        .duration(duration)
+        .attr("transform", function(d) { return "translate(" + d.y + "," + d.x + ")"; })
+        .style("opacity", 1);
+
+    node.transition()
+        .duration(duration)
+        .attr("transform", function(d) { return "translate(" + d.y + "," + d.x + ")"; })
+        .style("opacity", 1)
+        .select("rect")
+        .style("fill", color);
+
+    // Transition exiting nodes to the parent's new position.
+    node.exit().transition()
+        .duration(duration)
+        .attr("transform", function(d) { return "translate(" + source.y + "," + source.x + ")"; })
+        .style("opacity", 1e-6)
+        .remove();
+
+    // Update the links…
+    var link = call_svg.selectAll("path.link")
+        .data(tree.links(nodes), function(d) { return d.target.id; });
+
+    // Enter any new links at the parent's previous position.
+    link.enter().insert("path", "g")
+        .attr("class", "link")
+        .attr("d", function(d) {
+            var o = {x: source.x0, y: source.y0};
+            return diagonal({source: o, target: o});
+        })
+    .transition()
+        .duration(duration)
+        .attr("d", diagonal);
+
+    // Transition links to their new position.
+    link.transition()
+        .duration(duration)
+        .attr("d", diagonal);
+
+    // Transition exiting nodes to the parent's new position.
+    link.exit().transition()
+        .duration(duration)
+        .attr("d", function(d) {
+            var o = {x: source.x, y: source.y};
+            return diagonal({source: o, target: o});
+        })
+    .remove();
+
+    // Stash the old positions for transition.
+    nodes.forEach(function(d) {
+        d.x0 = d.x;
+        d.y0 = d.y;
+    });
+}
+
+// Toggle children on click.
+function click(d) {
+    if (d.children) {
+        d.calls = d.children;
+        d.children = null;
+    } else {
+        d.children = d.calls;
+        d.calls = null;
+    }
+    update_calls(d);
+}
+
+function pblock_click(d) {
+    call_root = d;
+    call_root.x0 = 0;
+    call_root.y0 = 0;
+    if (call_root.calls) {
+        call_root.children = call_root.calls;
+        call_root.calls = null;
+    }
+    d3.selectAll("rect.pblock").style("fill", "#5AD8E6");
+    d3.select(this).style("fill", "red");
+    update_calls(call_root);
+}
+
+function color(d) {
+    return "#3182bd";
+     // return d.calls ? "#3182bd" : d.children ? "#c6dbef" : "#fd8d3c";
+}
+
+
+d3.json("trace_2.json", function(err, data) {
     if (err) {
         alert(err.toString());
+        return;
     }
 data.duration = data.end - data.start;
 
@@ -73,11 +225,11 @@ var lw = 250, w = 900, tw = lw + w;
 var axis_height = 20;
 var pblock_height = 20;
 var sh = 50, th = sh * data.processes.length + axis_height;
-d3.select("#vis-panel").style("height", th+"px");
+d3.select("#process-diagram").style("height", th+"px");
 var tScale = d3.scale.linear()
         .domain([0, data.duration])
         .range([0, w]);
-var visPanel = d3.select("#vis-panel");
+var visPanel = d3.select("#process-diagram");
 var label_container = visPanel.append("div").classed("labels", true).style("width", lw + "px");
 var labels = label_container.selectAll("div.process-label")
     .data(data.processes)
@@ -115,8 +267,8 @@ var axisG = canvas.append("g").classed("t-axis", true).attr("transform", "transl
 
 // build the arrow.
 canvas.append("svg:defs").selectAll("marker")
-    .data(["end"])      // Different link/path types can be defined here
-    .enter().append("svg:marker")    // This section adds in the arrows
+    .data(["end"])
+    .enter().append("svg:marker")
     .attr("id", String)
     .attr("viewBox", "0 -5 10 10")
     .attr("refX", 8)
@@ -153,6 +305,7 @@ var pblocks = procs.selectAll("rect.pblock")
     .enter().append("rect")
     .attr("height", pblock_height)
     .classed("pblock", true)
+    .on("click", pblock_click)
     ;
 
 var msg_container = content.append("g").classed("msgs", true);

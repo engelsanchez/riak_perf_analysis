@@ -2,17 +2,13 @@
 -module(put_tracer).
 -export([start/1, process/2, create_json/1]).
 
--record(run, {start_time, end_time, events = []}).
--record(proc, {idx, label, pid, runs = [], current = #run{}}).
+-record(fcall, {start_time, end_time, mfa, sub_calls = []}).
+-record(run, {start_time, end_time, initial_mfa, seen_call = false,
+              events = []}).
+-record(proc, {idx, label, pid, stack = [], runs = [], current = #run{}}).
 -record(msg, {from, to, time, payload}).
--record(state, {
-          caller,
-          txt_file,
-          filename,
-          start_time, end_time,
-          procs = dict:new(),
-          messages = []
-        }).
+-record(state, {caller, txt_file, pending_link, filename, start_time, end_time,
+                procs = dict:new(), messages = []}).
 
 %% Set up tracing so that starting a PUT request generates a sequential
 %% token and trace the activity that it generates.
@@ -26,25 +22,32 @@ start(Filename) ->
     TFlags = [send, 'receive', running, procs],
     % Enable function call tracing, but start in silent mode
     dbg:p(all, [call, return_to, sos, timestamp, silent]),
+    % Make any function call while the process has a seq_token start
+    % tracing messages, scheduling and process events, etc.
+    % Disable tracing as soon as a function is called but the process
+    % does not have an active seq_token.
     dbg:tpl('_', [{'_', [{is_seq_trace}],
                    [{silent, false},
-                    {trace, [], TFlags}
+                    {trace, [], TFlags},
+                    {exception_trace}
                    ]},
                   {'_', [{'not', {is_seq_trace}}],
                    [{silent, true},
                     {trace, TFlags, []}
                    ]}
                  ]),
+    % Earliest known function call in the write path. Should probably
+    % replace with an earlier one in the webmachine/mochiweb request
+    % handling code. seq_token starts here.
     dbg:tpl(riak_kv_wm_object, malformed_request, 2,
            [{'_', [],
              [{set_seq_token, send, true},
               {set_seq_token, timestamp, true},
               {trace, [], TFlags}
              ]}]),
-    % These are 3 processes created during tracing. Unfortunately seq_trace
+    % These are 3 processes created during a write. Unfortunately seq_trace
     % tokens are not passed automatically to the new process, so we are
-    % activating the sequential token manually on the first function call
-    % for those processes.
+    % activating the sequential token manually on their first function call.
     dbg:tpl(riak_kv_get_fsm, init, 1,
             [{'_',[],[{set_seq_token, label, 1},
                       {set_seq_token, timestamp, true},
@@ -74,6 +77,7 @@ create_json(Filename) ->
                               {fun process/2,
                                #state{filename = Filename ++ ".json",
                                       txt_file = TxtFile,
+                                      pending_link = self(),
                                       caller = self()}}),
     % Wait until the client is done processing the entire trace output file.
     Ref = monitor(process, Client),
@@ -82,6 +86,8 @@ create_json(Filename) ->
             ok
     end.
 
+% Write a list to the output file and handle internal (but not final)
+% commas.
 write_list(_OF, _EFun, []) ->
     ok;
 write_list(OF, EFun, [E|Rest]) ->
@@ -94,24 +100,35 @@ write_list(OF, EFun, [E|Rest]) ->
     end,
     write_list(OF, EFun, Rest).
 
+write_call(OF, #fcall{mfa = {M, F, Args}, start_time = S, end_time = E,
+                      sub_calls = Sub}) ->
+    A = case is_list(Args) of true -> length(Args); false -> Args end,
+    io:format(OF, "{\"name\": \"~p:~p/~p\", \"start\": ~p, \"end\": ~p,"
+              " \"calls\":[\n", [M, F, A, S, E]),
+    write_list(OF, fun write_call/2, Sub),
+    io:format(OF, "]}\n", []),
+    ok.
+
 write_proc(OF, #proc{label = Label, pid = Pid, runs = Runs}) ->
-    io:format(OF, "\t\t{\"label\": \"~s\", \"pid\": \"~p\", \"runs\":\n", [Label, Pid]),
-    io:format(OF, "\t\t[\n",[]),
+    io:format(OF, "\t\t{\"label\": \"~s\", \"pid\": \"~p\", \"runs\":\n",
+              [Label, Pid]),
+    io:format(OF, "\t\t[\n", []),
     write_list(OF,
-               fun(F, #run{start_time = RS, end_time = RE}) ->
-                       io:format(F, "\t\t\t{\"start\": ~p, \"end\": ~p }",
-                                 [RS, RE])
+               fun(F, #run{start_time = RS, end_time = RE, events = Events}) ->
+                       io:format(F, "\t\t\t{\"start\": ~p, \"end\": ~p,"
+                                 " \"calls\":[\n", [RS, RE]),
+                       write_list(OF, fun write_call/2, Events), 
+                       io:format(F, "]}", [])
                end, Runs),
     io:format(OF, "\t\t]}", []),
     ok.
 
+% Poor man's JSON string escape.
 escape_str(Term) ->
     S = io_lib:format("~p", [Term]),
     S1 = re:replace(S, "\n", "\\\\n", [global]),
     S2 = re:replace(S1, "\r", "\\\\r", [global]),
-    S3 = re:replace(S2, "\"", "\\\\\"", [global]),
-    S3
-    .
+    re:replace(S2, "\"", "\\\\\"", [global]).
 
 write_msg(OF, #msg{from = From, to = To, time = Time, payload = Payload}) ->
     io:format(OF, "\t\t{\"time\": ~p, \"from\": ~p, \"to\": ~p,"
@@ -119,6 +136,7 @@ write_msg(OF, #msg{from = From, to = To, time = Time, payload = Payload}) ->
               [Time, From, To, escape_str(Payload)]),
     ok.
 
+%% Write current results as a JSON file.
 write_result(#state{filename = Fname,
                     start_time = Start,
                     end_time = End,
@@ -130,7 +148,7 @@ write_result(#state{filename = Fname,
     write_list(OF, fun write_proc/2, Procs), 
     io:format(OF, "\t],\n", []),
     io:format(OF, "\t\"messages\": [\n", []),
-    write_list(OF, fun write_msg/2, Msgs),
+    write_list(OF, fun write_msg/2, lists:reverse(Msgs)),
     io:format(OF, "\t]\n", []),
     io:format(OF, "}\n", []),
     file:close(OF),
@@ -178,7 +196,7 @@ prepare_results(State = #state{procs = Procs,
                                start_time = StartTime,
                                end_time = EndTime}) ->
     L1 = dict:fold(fun(_, P, Acc) ->
-                           P1 = close_run(P, relative_time(EndTime, StartTime)),
+                           P1 = do_proc_out(P, relative_time(EndTime, StartTime)),
                            [P1|Acc]
                    end, [], Procs),
     IdxCmp = fun(#proc{idx=LI}, #proc{idx=RI}) -> LI =< RI end,
@@ -186,63 +204,140 @@ prepare_results(State = #state{procs = Procs,
     State#state{procs=L2, start_time = 0.0,
                 end_time = relative_time(EndTime, StartTime)}.
 
-close_run(Proc = #proc{current = #run{start_time = undefined}}, _) ->
-    Proc;
-close_run(Proc = #proc{current = Current, runs = Runs}, Time) ->
-    Runs1 = [Current#run{end_time = Time}|Runs],
-    Proc#proc{current = #run{}, runs = Runs1}.
+do_proc_out(Proc = #proc{current = #run{start_time = undefined}}, _) ->
+    Proc#proc{current = #run{}};
+%% If only a process in event, ignore. It means process started
+%% lost its seq_token before doing any real work.
+do_proc_out(Proc = #proc{current = #run{seen_call = false}}, _) ->
+    Proc#proc{current = #run{}};
+do_proc_out(Proc = #proc{current = Current,
+                         stack = Stack, runs = Runs}, Time) ->
+    #run{events = Events, initial_mfa = InitMFA} = Current,
+    Events1 =
+    case {Stack, InitMFA, Events} of
+        {[], undefined, _} ->
+            Events;
+        {[], _, [#fcall{end_time=PrevTime}|_]} ->
+            FinalCall = #fcall{mfa = InitMFA, start_time = PrevTime,
+                               end_time = Time},
+            [FinalCall|Events];
+        _ ->
+            FinalCall = collapse_calls(Time, Stack),
+            [FinalCall | Events]
+    end,
+    Current1 = Current#run{end_time = Time, events = lists:reverse(Events1)},
+    Proc#proc{current = #run{}, runs = [Current1 | Runs]}.
 
-close_run(Proc = #proc{}, Time, State1) ->
-    Proc1 = close_run(Proc, Time),
+do_proc_out(Proc = #proc{}, Time, State1) ->
+    Proc1 = do_proc_out(Proc, Time),
     update_proc(Proc1, State1);
-close_run(Pid, Time, State) ->
+do_proc_out(Pid, Time, State) ->
     {Proc, State1} = get_proc(Pid, State),
-    close_run(Proc, Time, State1).
+    do_proc_out(Proc, Time, State1).
 
-open_run(Pid, Time, State) ->
-    {Proc, State1} = get_proc(Pid, State),
-    Proc1 = Proc#proc{current = #run{start_time = Time}},
+do_proc_in(Pid, MFA, Time, State) ->
+    {Proc = #proc{stack = Stack}, State1} = get_proc(Pid, State),
+    % Remove calls from previous run, leave unfinished calls with new time.
+    Stack1 = [Call#fcall{sub_calls=[], start_time = Time} || Call <- Stack],
+    Proc1 = Proc#proc{stack = Stack1,
+                      current = #run{start_time = Time,
+                                     initial_mfa = MFA}},
     update_proc(Proc1, State1).
 
-add_call(Pid, _MFArgs, Time, State) ->
+do_call(Pid, MFArgs, Time, State) ->
     {Proc, State1} = get_proc(Pid, State),
+    Proc1 =
     case Proc of
-        #proc{current = #run{start_time = undefined}} ->
-            Proc1 = Proc#proc{current = #run{start_time = Time}},
-            update_proc(Proc1, State1);
+        #proc{current = Current = #run{start_time = undefined}} ->
+            Proc#proc{current = Current#run{start_time = Time}};
         _ ->
-            State1
-    end.
+            Proc
+    end,
+    Fcall = #fcall{start_time = Time, mfa = MFArgs},
+    Proc2 = Proc1#proc{stack = [Fcall | Proc1#proc.stack],
+                       current = Proc1#proc.current#run{seen_call = true}},
+    update_proc(Proc2, State1).
+
+do_return(Pid, {M, F, A}, Time, State) ->
+    {Proc = #proc{stack = Stack,
+                  current = Current = #run{events = Events}},
+     State1} = get_proc(Pid, State),
+    %% Assert return matches top function name and arity.
+    [Fcall = #fcall{mfa = {M, F, Args},
+                    sub_calls = Fsub} | Stack1] = Stack,
+    A = length(Args),
+    Fcall2 = Fcall#fcall{end_time = Time,
+                         sub_calls = lists:reverse(Fsub)},
+    Proc1 =
+    case Stack1 of
+        [] ->
+            Proc#proc{stack = [],
+                      current = Current#run{events = [Fcall2|Events]}};
+        [Pcall = #fcall{sub_calls = SubCalls} | Stack2 ] ->
+            Pcall2 = Pcall#fcall{sub_calls = [Fcall2 | SubCalls]},
+            Proc#proc{stack = [Pcall2 | Stack2]}
+    end,
+    update_proc(Proc1, State1).
+
+collapse_calls(Time, [#fcall{sub_calls = Sub} = Fcall]) ->
+    Fcall#fcall{end_time = Time, sub_calls = lists:reverse(Sub)};
+collapse_calls(Time, [#fcall{} = Fcall1,
+                      #fcall{sub_calls = Sub} = Fcall2 | Rest]) ->
+    collapse_calls(Time,
+                   [Fcall2#fcall{sub_calls = [Fcall1#fcall{end_time = Time}
+                                               | Sub]} | Rest]).
 
 %% { start, end, processes: [{label, pid, runs:[{start, end}]}], messages:
 %% [{time, from, to, payload}]
 %% Produce JSON data for visualization from trace
+
+% Link to caller for easier debugging on crash before processing data.
+process(T, State = #state{pending_link = Pid}) when is_pid(Pid) ->
+    link(Pid),
+    process(T, State#state{pending_link = undefined});
+%% End of input trace file reached.
 process(end_of_trace, State) ->
     io:format("Finished reading trace, writing results\n", []),
     State1 = prepare_results(State),
     file:close(State#state.txt_file),
     write_result(State1);
+
+%% Message sent.
 process(T = {seq_trace, _, {send, _, Pid, To, Msg}, Time}, State) ->
     io:format(State#state.txt_file, "~p.\n", [T]),
     State1 = update_time(Time, State),
     Time1 = relative_time(Time, State1#state.start_time),
     add_msg(Pid, Msg, To, Time1, State1);
-process(T = {trace_ts, Pid, in, _, Time}, State) ->
+
+% Erlang process being scheduled.
+process(T = {trace_ts, Pid, in, MFA, Time}, State) ->
     io:format(State#state.txt_file, "~p.\n", [T]),
-    State1 = update_time(Time, State),
-    Time1 = relative_time(Time, State1#state.start_time),
-    open_run(Pid, Time1, State1);
+    Time1 = relative_time(Time, State#state.start_time),
+    do_proc_in(Pid, MFA, Time1, State);
+
+%% Erlang process being de-scheduled or exiting.
 process(T = {trace_ts, Pid, OutExit, _, Time}, State)
   when OutExit == out; OutExit == exit ->
     io:format(State#state.txt_file, "~p.\n", [T]),
     State1 = update_time(Time, State),
     Time1 = relative_time(Time, State1#state.start_time),
-    close_run(Pid, Time1, State1);
+    do_proc_out(Pid, Time1, State1);
+
+%% Entering function call.
 process(T = {trace_ts, Pid, call, MFArgs, Time}, State) ->
     io:format(State#state.txt_file, "~p.\n", [T]),
     State1 = update_time(Time, State),
     Time1 = relative_time(Time, State1#state.start_time),
-    add_call(Pid, MFArgs, Time1, State1);
+    do_call(Pid, MFArgs, Time1, State1);
+
+%% Returning from a function call.
+process(T = {trace_ts, Pid, ReturnToken, MFA, _, Time}, State)
+  when ReturnToken == return_from; ReturnToken == exception_from ->
+    io:format(State#state.txt_file, "~p.\n", [T]),
+    State1 = update_time(Time, State),
+    Time1 = relative_time(Time, State1#state.start_time),
+    do_return(Pid, MFA, Time1, State1);
+
 process(T, State) ->
     io:format(State#state.txt_file, "~p.\n", [T]),
     State.
