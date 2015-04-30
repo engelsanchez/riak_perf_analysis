@@ -52,10 +52,10 @@ erlang$target:::user_trace-i4s4
     this->proc = copyinstr(arg0);
     this->section = arg2;
     this->elapsed = p[this->proc].duration + vtimestamp - p[this->proc].start;
-    @cnt[this->proc, this->section] = count();
-    @lmin[this->proc, this->section] = min(this->elapsed);
-    @lmax[this->proc, this->section] = max(this->elapsed);
-    @lavg[this->proc, this->section] = avg(this->elapsed);
+    @cnt[this->section] = count();
+    @lmin[this->section] = min(this->elapsed);
+    @lmax[this->section] = max(this->elapsed);
+    @lavg[this->section] = avg(this->elapsed);
     @lq[this->section] = lquantize(this->elapsed, 0, EXPECTED_MAX, BUCKET_SIZE);
     p[this->proc].duration = 0;
     p[this->proc].start = 0;
