@@ -45,6 +45,13 @@ start(Filename) ->
               {set_seq_token, timestamp, true},
               {trace, [], TFlags}
              ]}]),
+    dbg:tpl(riak_kv_pb_object, decode, 2,
+           [{'_', [],
+             [{set_seq_token, label, 3},
+              {set_seq_token, send, true},
+              {set_seq_token, timestamp, true},
+              {trace, [], TFlags}
+             ]}]),
     % These are 3 processes created during a write. Unfortunately seq_trace
     % tokens are not passed automatically to the new process, so we are
     % activating the sequential token manually on their first function call.
@@ -196,7 +203,7 @@ prepare_results(State = #state{procs = Procs,
                                start_time = StartTime,
                                end_time = EndTime}) ->
     L1 = dict:fold(fun(_, P, Acc) ->
-                           P1 = do_proc_out(P, relative_time(EndTime, StartTime)),
+                           P1 = do_proc_out(P, undefined),
                            [P1|Acc]
                    end, [], Procs),
     IdxCmp = fun(#proc{idx=LI}, #proc{idx=RI}) -> LI =< RI end,
@@ -244,6 +251,11 @@ do_proc_in(Pid, MFA, Time, State) ->
                                      initial_mfa = MFA}},
     update_proc(Proc1, State1).
 
+remove_no_returns([#fcall{mfa={ets, select_reverse, _}} | Stack]) ->
+    Stack;
+remove_no_returns(Stack) ->
+    Stack.
+
 do_call(Pid, MFArgs, Time, State) ->
     {Proc, State1} = get_proc(Pid, State),
     Proc1 =
@@ -253,11 +265,24 @@ do_call(Pid, MFArgs, Time, State) ->
         _ ->
             Proc
     end,
-    Fcall = #fcall{start_time = Time, mfa = MFArgs},
-    Proc2 = Proc1#proc{stack = [Fcall | Proc1#proc.stack],
+    Fcall = #fcall{start_time = Time, end_time = Time, mfa = MFArgs},
+    Stack1 = remove_no_returns(Proc1#proc.stack),
+    Proc2 = Proc1#proc{stack = [Fcall | Stack1],
                        current = Proc1#proc.current#run{seen_call = true}},
     Proc3 = maybe_label_proc(Proc2, MFArgs),
     update_proc(Proc3, State1).
+
+update_latest_time(Pid, Time, State) ->
+    {Proc, State1} = get_proc(Pid, State),
+    #proc{stack = Stack} = Proc,
+    case Stack of
+        [] ->
+            State1;
+        [TopCall | OtherCalls] ->
+            Stack1 = [ TopCall#fcall{end_time = Time} | OtherCalls],
+            Proc2 = Proc#proc{stack = Stack1},
+            update_proc(Proc2, State1)
+    end.
 
 maybe_label_proc(Proc, {riak_kv_put_fsm, init, _}) ->
     Proc#proc{label="Put FSM"};
@@ -277,6 +302,10 @@ maybe_label_proc(Proc, {sidejob_supervisor, handle_call, _}) ->
     Proc#proc{label="Sidejob Sup"};
 maybe_label_proc(Proc, {exometer_probe, handle_msg, _}) ->
     Proc#proc{label="Exometer Probe"};
+maybe_label_proc(Proc, {exometer_report, handle_cast, _}) ->
+    Proc#proc{label="Exometer Report"};
+maybe_label_proc(Proc, {exometer_admin, handle_call, _}) ->
+    Proc#proc{label="Exometer Admin"};
 maybe_label_proc(Proc, {mochiweb_socket_server, handle_info, _}) ->
     Proc#proc{label="Mochi Socket"};
 maybe_label_proc(Proc, {webmachine_decision_core, do_log, _}) ->
@@ -289,8 +318,14 @@ do_return(Pid, {M, F, A}, Time, State) ->
                   current = Current = #run{events = Events}},
      State1} = get_proc(Pid, State),
     %% Assert return matches top function name and arity.
-    [Fcall = #fcall{mfa = {M, F, Args},
-                    sub_calls = Fsub} | Stack1] = Stack,
+    [Fcall = #fcall{mfa = {_, _, Args}, sub_calls = Fsub} | Stack1] =
+        remove_no_returns(Stack),
+    case Fcall#fcall.mfa of
+        {M, F, _} ->
+            ok;
+        _ ->
+            throw({mismatched_return, {M, F, A}, Stack})
+    end,
     A = length(Args),
     Fcall2 = Fcall#fcall{end_time = Time,
                          sub_calls = lists:reverse(Fsub)},
@@ -300,18 +335,22 @@ do_return(Pid, {M, F, A}, Time, State) ->
             Proc#proc{stack = [],
                       current = Current#run{events = [Fcall2|Events]}};
         [Pcall = #fcall{sub_calls = SubCalls} | Stack2 ] ->
-            Pcall2 = Pcall#fcall{sub_calls = [Fcall2 | SubCalls]},
+            Pcall2 = Pcall#fcall{sub_calls = [Fcall2 | SubCalls],
+                                 end_time = Time},
             Proc#proc{stack = [Pcall2 | Stack2]}
     end,
     update_proc(Proc1, State1).
 
-collapse_calls(Time, [#fcall{sub_calls = Sub} = Fcall]) ->
-    Fcall#fcall{end_time = Time, sub_calls = lists:reverse(Sub)};
-collapse_calls(Time, [#fcall{} = Fcall1,
-                      #fcall{sub_calls = Sub} = Fcall2 | Rest]) ->
+collapse_calls(Time, [#fcall{end_time = EndTime, sub_calls = Sub} = Fcall]) ->
+    Fcall#fcall{end_time = max(Time, EndTime),
+                sub_calls = lists:reverse(Sub)};
+collapse_calls(Time, [#fcall{sub_calls = Sub1, end_time = EndTime} = Fcall1,
+                      #fcall{sub_calls = Sub2} = Fcall2 | Rest]) ->
     collapse_calls(Time,
-                   [Fcall2#fcall{sub_calls = [Fcall1#fcall{end_time = Time}
-                                               | Sub]} | Rest]).
+                   [Fcall2#fcall{sub_calls =
+                                 [Fcall1#fcall{end_time = max(Time, EndTime),
+                                               sub_calls = lists:reverse(Sub1)}
+                                  | Sub2]} | Rest]).
 
 %% { start, end, processes: [{label, pid, runs:[{start, end}]}], messages:
 %% [{time, from, to, payload}]
@@ -364,6 +403,11 @@ process(T = {trace_ts, Pid, ReturnToken, MFA, _, Time}, State)
     Time1 = relative_time(Time, State1#state.start_time),
     do_return(Pid, MFA, Time1, State1);
 
+process(T = {trace_ts, Pid, 'receive', _Msg, Time}, State) ->
+    io:format(State#state.txt_file, "~p.\n", [T]),
+    Time1 = relative_time(Time, State#state.start_time),
+    update_latest_time(Pid, Time1, State);
+    
 process(T, State) ->
     io:format(State#state.txt_file, "~p.\n", [T]),
     State.
