@@ -41,12 +41,15 @@ path.link {
     stroke-width: 1.5px;
 }
 
+span.spawned-process:after { content:","}
+span.spawned-process:last-child:after { content:""}
 </style>
 </head>
 
 <body>
     <h1>Put Path Visualization</h1>
     <div id="file-selection"></div>
+    <div id="spawned-processes"></div>
     <div id="process-diagram"></div>
     <div id="calls"></div>
 
@@ -74,14 +77,6 @@ var call_svg = d3.select("#calls").append("svg")
     .append("g")
     .attr("transform", "translate(" + margin.left + "," + margin.top + ")");
 
-    /*
-d3.json("flare.json", function(error, flare) {
-        flare.x0 = 0;
-        flare.y0 = 0;
-        update_calls(call_root = flare);
-    });
-    */
-
 function update_calls(source) {
 
     var nodes = tree.nodes(call_root);
@@ -91,12 +86,6 @@ function update_calls(source) {
     d3.select("#calls > svg").transition()
         .duration(duration)
         .attr("height", height);
-
-    /*
-    d3.select(self.frameElement).transition()
-        .duration(duration)
-        .style("height", height + "px");
-        */
 
     // Compute the "layout".
     nodes.forEach(function(n, i) {
@@ -124,7 +113,7 @@ function update_calls(source) {
         .attr("dy", 3.5)
         .attr("dx", 5.5)
         .text(function(d) {
-            return d.name + " ( "+d3.format(".1f")(d.end - d.start)+"usecs )";
+            return d.name + " ( "+d3.format(".3f")(d.end - d.start)+"msecs )";
         });
 
     // Transition nodes to their new position.
@@ -214,23 +203,26 @@ function color(d) {
 }
 
 
-var files = ["<Select data file>", "trace_1.json", "trace_2.json",
-"pb_put.trace.json"];
-
-var fileSelect = d3.select("#file-selection").append("select");
-
-fileSelect.selectAll("option").data(files)
-    .enter().append("option").attr("value", function(d){return d;})
-    .text(function(d){return d;});
-
-var fileOptions = d3.selectAll("select option");
-
-fileSelect.on("change", function() {
-    var selectedIndex = fileSelect.property('selectedIndex');
-    if (selectedIndex > 0) {
-        var filename = fileOptions[0][selectedIndex].__data__;
-        load_data(filename);
+d3.json("data_files.json", function(err, data) {
+    if (err) {
+        alert("Error trying to load list of data files: " + err.toString());
+        return;
     }
+    var fileSelect = d3.select("#file-selection").append("select");
+
+    fileSelect.selectAll("option").data(data.data_files)
+        .enter().append("option").attr("value", function(d){return d.name;})
+        .text(function(d){return d.label;});
+
+    var fileOptions = d3.selectAll("select option");
+
+    fileSelect.on("change", function() {
+        var selectedIndex = this.selectedIndex;
+        if (selectedIndex > 0) {
+            var filename = this.options[selectedIndex].value;
+            load_data(filename);
+        }
+    });
 });
 
 function load_data(filename) {
@@ -342,6 +334,15 @@ function to_proc_y(msg) {
 function from_proc_y(msg) {
     var ofs = msg.from > msg.to ? -pblock_height / 2.0 : pblock_height / 2.0;
     return proc2height(null, msg.from) + ofs;
+}
+
+if (data.spawned && data.spawned.length) {
+    var spawned_container = d3.select("#spawned-processes");
+    spawned_container.append("span").text("Spawned processes: ");
+    var spawned = spawned_container.selectAll("span.spawned-process")
+        .data(data.spawned).enter()
+        .append("span").classed("spawned-process", true)
+        .text(function(d) {return d});
 }
 
 var msgs = msg_container.selectAll("line.msg")
