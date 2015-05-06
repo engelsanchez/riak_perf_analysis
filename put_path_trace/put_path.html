@@ -43,6 +43,7 @@ path.link {
 
 span.spawned-process:after { content:","}
 span.spawned-process:last-child:after { content:""}
+#calls-header {display:none; margin-top:15px; margin-bottom:15px}
 </style>
 </head>
 
@@ -51,6 +52,10 @@ span.spawned-process:last-child:after { content:""}
     <div id="file-selection"></div>
     <div id="spawned-processes"></div>
     <div id="process-diagram"></div>
+    <div id="calls-header">
+        Call hierarchy. Click on nodes to toggle them. Shift-Click to 
+        expand or collapse recursively.
+    </div>
     <div id="calls"></div>
 
 <script src="../d3/d3.min.js"></script>
@@ -67,7 +72,7 @@ var i = 0,
     call_root;
 
 var tree = d3.layout.tree()
-    .nodeSize([0, 20]);
+    .nodeSize([0, 8]);
 
 var diagonal = d3.svg.diagonal()
     .projection(function(d) { return [d.y, d.x]; });
@@ -172,14 +177,43 @@ function update_calls(source) {
     });
 }
 
-// Toggle children on click.
-function click(d) {
+function expand_recursive(d) {
+    if (d.calls) {
+        d.children = d.calls;
+        d.calls = null;
+    }
+
+    if (d.children && d.children.length)
+        d.children.forEach(expand_recursive);
+}
+
+function collapse_recursive(d) {
     if (d.children) {
         d.calls = d.children;
         d.children = null;
+    }
+
+    if (d.calls && d.calls.length)
+        d.calls.forEach(collapse_recursive);
+}
+
+// Toggle children on click.
+// Shift will do expand or collapse recursively.
+function click(d) {
+    if (d3.event.shiftKey) {
+        if (d.children) {
+            collapse_recursive(d);
+        } else {
+            expand_recursive(d);
+        }
     } else {
-        d.children = d.calls;
-        d.calls = null;
+        if (d.children) {
+            d.calls = d.children;
+            d.children = null;
+        } else {
+            d.children = d.calls;
+            d.calls = null;
+        }
     }
     update_calls(d);
 }
@@ -192,6 +226,7 @@ function pblock_click(d) {
         call_root.children = call_root.calls;
         call_root.calls = null;
     }
+    d3.select("#calls-header").style("display", "block");
     d3.selectAll("rect.pblock").style("fill", "#5AD8E6");
     d3.select(this).style("fill", "red");
     update_calls(call_root);
