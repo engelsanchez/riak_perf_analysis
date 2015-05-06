@@ -258,6 +258,8 @@ d3.json("data_files.json", function(err, data) {
             load_data(filename);
         }
     });
+    if (data.data_files && data.data_files.length)
+        load_data(data.data_files[0].name);
 });
 
 function load_data(filename) {
